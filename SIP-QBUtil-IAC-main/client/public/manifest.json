@@ -1,0 +1,15 @@
+{
+  "short_name": "Sage Qb",
+  "name": "Sage Qb Accounting",
+  "icons": [
+    {
+      "src": "logo.png",
+      "type": "image/png",
+      "sizes": "162x30"
+    }
+  ],
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#000000",
+  "background_color": "#ffffff"
+}

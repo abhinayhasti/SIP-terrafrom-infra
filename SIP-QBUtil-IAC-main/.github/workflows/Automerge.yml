@@ -1,0 +1,89 @@
+name: PR_AutoMerge
+on:
+ pull_request:
+  types: [labeled]
+  branches:
+      - 'main'
+ 
+ pull_request_review:
+    types: [submitted]
+    branches:
+      - 'main'
+      
+jobs:
+  Automerge:
+    if: |
+      github.event.label.name == 'terraform_plan_succeeded' || github.event.review.state == 'approved'
+    runs-on: ubuntu-latest
+    steps:            
+      - name: Pending reviews Validations
+        id: reviews
+        continue-on-error: true
+        run: |
+              echo " !! Reviews Validations !! ";
+              PR_NUMBER=$(echo $GITHUB_REF | awk 'BEGIN { FS = "/" } ; { print $3 }');
+              echo $PR_NUMBER;
+              PR_REQUESTED=$(gh api repos/Intacct/SIP-QBUtil-IAC/pulls/$PR_NUMBER/requested_reviewers --paginate --jq "[.teams[], .users[]] | length");  
+              if [ $PR_REQUESTED != '0' ]
+              then
+              echo " ------> PR has Pending reviews <-------";
+              echo "match=true" >> $GITHUB_OUTPUT
+              else   
+              echo "Congratulatons !! All reviews have been Approved";
+              echo "match=false" >> $GITHUB_OUTPUT
+              fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: remove Approved Label
+        if: steps.reviews.outputs.match == 'true'         
+        uses: buildsville/add-remove-label@v2.0.0
+        with:
+          token: ${{secrets.GITHUB_TOKEN}}
+          label: Approved
+          type: remove
+  
+  
+      - name: Add pendingreviews Labels
+        if: steps.reviews.outputs.match == 'true'
+        uses: buildsville/add-remove-label@v2.0.0
+        with:
+          token: ${{secrets.GITHUB_TOKEN}}
+          label: Review_is_Pending
+          type: add  
+          
+      - name: pendingreviews
+        if: steps.reviews.outputs.match == 'true'
+        run: |
+            echo "---> PR has Pending Reviews"
+            exit 1;
+     
+      - name: Add Approved Labels
+        if: steps.reviews.outputs.match == 'false'         
+        uses: buildsville/add-remove-label@v2.0.0
+        with:
+          token: ${{secrets.GITHUB_TOKEN}}
+          label: Approved
+          type: add
+  
+      - name: remove Review_is_Pending Labels
+        if: steps.reviews.outputs.match == 'false'
+        uses: buildsville/add-remove-label@v2.0.0
+        with:
+          token: ${{secrets.GITHUB_TOKEN}}
+          label: Review_is_Pending
+          type: remove
+          
+      
+      - name: automerge
+        uses: pascalgn/automerge-action@v0.15.6
+        env:
+          GITHUB_TOKEN: '${{ secrets.JENKINS_GH_TOKEN }}'
+          MERGE_LABELS: 'terraform_plan_succeeded,!terraform_plan_failed'
+          MERGE_METHOD: 'merge'
+          MERGE_COMMIT_MESSAGE: "pull-request-title"
+          MERGE_FORKS: 'false'
+          MERGE_RETRIES: '30'
+          MERGE_RETRY_SLEEP: '100'
+          UPDATE_METHOD: "merge"
+          UPDATE_LABELS: 'terraform_plan_succeeded'

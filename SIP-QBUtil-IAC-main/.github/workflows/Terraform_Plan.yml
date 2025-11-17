@@ -1,0 +1,226 @@
+
+name: Terraform-plan
+permissions:
+  id-token: write   # This is required for requesting the JWT
+  contents: read    # This is required for actions/checkout
+  pull-requests: write
+# Controls when the workflow will run
+on:
+  # Triggers the workflow on push or pull request events but only for the "main" branch
+  pull_request:
+    branches: ["main"]
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+         
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  build_server:
+    if: github.event_name == 'pull_request'
+    concurrency: dev-build-server
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.build-server.outputs.image_tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup AWS ECR Details
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::641756436960:role/github_oidc_sip_qbutil
+          role-session-name: githubAWSSession
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: "Create ECR repo if needed"
+        run: |
+          aws ecr create-repository --repository-name qbutil-server --encryption-configuration encryptionType=AES256 --region ${{ vars.AWS_REGION }} || true
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          role-to-assume: arn:aws:iam::641756436960:role/github_oidc_sip_qbutil
+          role-session-name: githubAWSSession
+
+      - name: Login to Amazon ECR
+        id: login-pf-aws-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build and push the tagged docker image to Amazon ECR
+        id: build-server
+        env:
+          ECR_REGISTRY: ${{ steps.login-pf-aws-ecr.outputs.registry }}
+          ECR_IMAGE: qbutil-server
+        working-directory: ./server
+        run: |
+          COMMIT_ID=$(git rev-parse --short HEAD)
+          docker build -t $ECR_REGISTRY/$ECR_IMAGE:$COMMIT_ID .
+          #docker push $ECR_REGISTRY/$ECR_IMAGE:$COMMIT_ID
+          echo "image_tag=$ECR_REGISTRY/$ECR_IMAGE:$COMMIT_ID" >> "$GITHUB_OUTPUT"
+
+  build_client:
+    if: github.event_name == 'pull_request'
+    concurrency: dev-build-client
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.build-client.outputs.image_tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup AWS ECR Details
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::641756436960:role/github_oidc_sip_qbutil
+          role-session-name: githubAWSSession
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: "Create ECR repo if needed"
+        run: |
+          aws ecr create-repository --repository-name qbutil-client --encryption-configuration encryptionType=AES256 --region ${{ vars.AWS_REGION }} || true
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          role-to-assume: arn:aws:iam::641756436960:role/github_oidc_sip_qbutil
+          role-session-name: githubAWSSession
+
+      - name: Login to Amazon ECR
+        id: login-pf-aws-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Build and push the tagged docker image to Amazon ECR
+        id: build-client
+        env:
+          ECR_REGISTRY: ${{ steps.login-pf-aws-ecr.outputs.registry }}
+          ECR_IMAGE: qbutil-client
+        working-directory: ./client
+        run: |
+          COMMIT_ID=$(git rev-parse --short HEAD)
+          docker build -t $ECR_REGISTRY/$ECR_IMAGE:$COMMIT_ID .
+          #docker push $ECR_REGISTRY/$ECR_IMAGE:$COMMIT_ID
+          echo "image_tag=$ECR_REGISTRY/$ECR_IMAGE:$COMMIT_ID" >> "$GITHUB_OUTPUT"
+
+  terraform:
+    #concurrency: dev
+    runs-on: ubuntu-latest
+    needs:
+      - build_server
+      - build_client
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: configure aws credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: arn:aws:iam::641756436960:role/github_oidc_sip_qbutil
+          role-session-name: githubAWSSession
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: "Create backend bucket"
+        run: |
+          aws s3 mb s3://${{ vars.TF_BACKEND_S3_BUCKET }} --region ${{ vars.AWS_REGION }} || true
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          role-to-assume: arn:aws:iam::641756436960:role/github_oidc_sip_qbutil
+          role-session-name: githubAWSSession
+
+      - name: "Prepare backend file"
+        uses: cschleiden/replace-tokens@v1
+        with:
+          tokenPrefix: "#{"
+          tokenSuffix: "}#"
+          files: '["terraform/backend.tf"]'
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION}}
+          TF_BACKEND_S3_BUCKET: ${{ vars.TF_BACKEND_S3_BUCKET }}
+          TF_BACKEND_S3_KEY: ${{ vars.TF_BACKEND_S3_KEY }}
+      #- name: "cat backend"  
+      #  run: |
+      #    cat terraform/backend.tf
+
+      - name: Terraform Format
+        id: fmt
+        working-directory: terraform
+        run: terraform fmt -check
+        continue-on-error: true
+
+      - name: Terraform Init
+        id: init
+        working-directory: terraform
+        run: terraform init
+
+      - name: Terraform Validate
+        id: validate
+        working-directory: terraform
+        run: terraform validate -no-color
+        
+      - name: Terraform Plan
+        id: plan
+        uses: dflook/terraform-plan@v1.36.2
+        continue-on-error: true
+        with:
+          add_github_comment: changes-only
+          path: ./terraform
+          parallelism: 4
+          var_file: |
+            terraform/dev.tfvars
+          variables: |
+            server_image="${{needs.build_server.outputs.image_tag}}"
+            client_image="${{needs.build_client.outputs.image_tag}}"
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+         #CLOUDFLARE_API_TOKEN: "${{ secrets.CLOUDFLARE_API_TOKEN }}"
+
+         
+      - name: Update Pull Request
+        uses: marocchino/sticky-pull-request-comment@v2.8.0
+        if: github.event_name == 'pull_request'
+        env:
+          PLAN: "terraform\n${{ steps.plan.outputs.stdout }}"
+        #with:
+          #github-token: ${{ secrets.GITHUB_TOKEN }}
+          message: |
+            const output = `#### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
+            #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
+            #### Terraform Plan 📖\`${{ steps.plan.outcome }}\`
+            #### Terraform Validation 🤖\`${{ steps.validate.outcome }}\`
+            <details><summary>Show Plan</summary>
+            
+            
+            \`\`\`\n
+            ${process.env.plan}
+            \`\`\`
+            </details>
+            
+            
+            *Pushed by: @${{ github.actor }}, Action: \`${{ github.event_name }}\`*`;
+            
+        
+      
+      - name: Label plan success
+        if: steps.plan.outcome == 'success'
+        uses: buildsville/add-remove-label@v2.0.0
+        with:
+          token: ${{secrets.GITHUB_TOKEN}}
+          label: terraform_plan_succeeded
+          type: add
+      
+      - name: Label plan failed
+        if: steps.plan.outcome == 'failure'
+        uses: buildsville/add-remove-label@v2.0.0
+        with:
+          token: ${{secrets.GITHUB_TOKEN}}
+          label: terraform_plan_failed
+          type: add
+          
+      - name: remove Label plan failed
+        if: steps.plan.outcome == 'success'
+        uses: buildsville/add-remove-label@v2.0.0
+        with:
+          token: ${{secrets.GITHUB_TOKEN}}
+          label: terraform_plan_failed
+          type: remove
+          
+      - name: Terraform Plan Status
+        if: steps.plan.outcome == 'failure'
+        run: exit 1
+
+     

@@ -1,0 +1,13 @@
+.button {
+  background-color: #004a87;
+  color: white;
+  font-weight: 400;
+  transition: 0.5s;
+  font-size: medium;
+}
+
+.button:hover {
+  background-color: rgb(155, 153, 153);
+  color: #004a87;
+}
+
